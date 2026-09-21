@@ -144,12 +144,53 @@ def seed_demo_data(days=5, rng=None, recorder_pool=RECORDERS):
             )
         annotated += 1
     totals["annotated"] = annotated
+
+    # 演示“修正数据 -> 超标记录撤销但标注痕迹保留”: 把一条已确认记录修正到限值以下
+    target = (
+        Exceedance.query.filter_by(status="confirmed")
+        .order_by(Exceedance.id.asc())
+        .first()
+    )
+    if target is not None:
+        measurement_service.record_entries(
+            station_id=target.station_id,
+            measured_at=target.measured_at,
+            period=target.period,
+            entries=[{"pollutant": target.pollutant, "value": round(target.limit_value * 0.8, 2)}],
+            data_source="manual",
+            recorder=rng.choice(recorder_pool),
+            remark="演示数据修正: 原值录入有误",
+            overwrite=True,
+        )
+        totals["revoked"] = 1
     return totals
 
 
 def reset_database():
     db.drop_all()
     db.create_all()
+
+
+# 旧版本数据库的幂等列升级: create_all 只会补缺失的表, 不会补缺失的列
+_COLUMN_UPGRADES = {
+    "exceedances": {
+        "revision": "ALTER TABLE exceedances ADD COLUMN revision INTEGER NOT NULL DEFAULT 1",
+    },
+}
+
+
+def ensure_schema_upgrades():
+    """Add columns introduced after the initial schema (idempotent)."""
+    inspector = db.inspect(db.engine)
+    tables = set(inspector.get_table_names())
+    for table, columns in _COLUMN_UPGRADES.items():
+        if table not in tables:
+            continue
+        existing = {column["name"] for column in inspector.get_columns(table)}
+        for column, statement in columns.items():
+            if column not in existing:
+                db.session.execute(db.text(statement))
+    db.session.commit()
 
 
 def ensure_bootstrap(app):
@@ -162,6 +203,7 @@ def ensure_bootstrap(app):
         try:
             if auto_init:
                 db.create_all()
+                ensure_schema_upgrades()
             if auto_seed and db.session.query(Station.id).first() is None:
                 app.logger.info("seeding demo data ...")
                 seed_demo_data()

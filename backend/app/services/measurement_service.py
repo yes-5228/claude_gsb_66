@@ -66,6 +66,7 @@ def record_entries(station_id, measured_at, period, entries, data_source="manual
     }
 
     created, updated, exceeded, duplicates, evaluated = [], [], [], [], []
+    revoked, reinstated = [], []
     seen = set()
     for entry in entries:
         pollutant = str(entry.get("pollutant", "")).upper()
@@ -126,11 +127,15 @@ def record_entries(station_id, measured_at, period, entries, data_source="manual
         record.recorder = entry.get("recorder") or recorder
         record.remark = entry.get("remark") or remark
 
-        _sync_exceedance(record, meta, evaluation)
+        sync_event = _sync_exceedance(record, meta, evaluation, actor=record.recorder)
         db.session.flush()
         (created if is_new else updated).append(record.to_dict(include_station=True))
         if evaluation["exceeded"]:
             exceeded.append(record.exceedance.to_dict() if record.exceedance else None)
+        if sync_event == "revoked":
+            revoked.append(record.exceedance.to_dict())
+        elif sync_event == "reinstated":
+            reinstated.append(record.exceedance.to_dict())
 
     if not created and not updated and duplicates:
         raise ConflictError(
@@ -146,6 +151,8 @@ def record_entries(station_id, measured_at, period, entries, data_source="manual
         "created": created,
         "updated": updated,
         "exceedances": [item for item in exceeded if item],
+        "revoked_exceedances": revoked,
+        "reinstated_exceedances": reinstated,
         "duplicates": duplicates,
         "evaluations": evaluated,
         "summary": {
@@ -153,15 +160,24 @@ def record_entries(station_id, measured_at, period, entries, data_source="manual
             "updated_count": len(updated),
             "exceeded_count": len([item for item in evaluated if item["exceeded"]]),
             "duplicate_count": len(duplicates),
+            "revoked_count": len(revoked),
+            "reinstated_count": len(reinstated),
         },
     }
 
 
-def _sync_exceedance(record, meta, evaluation):
-    """Create / refresh / drop the exceedance row attached to a measurement."""
+def _sync_exceedance(record, meta, evaluation, actor=None):
+    """Reconcile the exceedance row with the latest judgement.
+
+    数据修正只改变判定结果, 不删除处置痕迹: 不再超标时记录转为 ``revoked``
+    (保留原标注人/说明/时间), 重新超标时回到 ``pending`` 等待重新复核,
+    每次变化都追加一条 :class:`ExceedanceEvent` 并递增 ``revision``。
+    返回发生的事件类型 (无变化时返回 None)。
+    """
+    exceedance = record.exceedance
     if evaluation["exceeded"]:
-        if record.exceedance is None:
-            record.exceedance = Exceedance(
+        if exceedance is None:
+            exceedance = Exceedance(
                 station_id=record.station_id,
                 pollutant=record.pollutant,
                 period=record.period,
@@ -171,15 +187,45 @@ def _sync_exceedance(record, meta, evaluation):
                 exceed_ratio=evaluation["ratio"],
                 level=evaluation["level"],
                 status="pending",
+                revision=1,
             )
-        else:
-            record.exceedance.value = record.value
-            record.exceedance.limit_value = evaluation["limit"]
-            record.exceedance.exceed_ratio = evaluation["ratio"]
-            record.exceedance.level = evaluation["level"]
-            record.exceedance.measured_at = record.measured_at
-    elif record.exceedance is not None:
-        db.session.delete(record.exceedance)
+            record.exceedance = exceedance
+            exceedance.log_event("created", actor=actor, note="数据录入判定超标, 自动建单")
+            return "created"
+
+        changed = (
+            exceedance.value != record.value
+            or exceedance.limit_value != evaluation["limit"]
+            or exceedance.level != evaluation["level"]
+        )
+        was_revoked = exceedance.status == "revoked"
+        exceedance.value = record.value
+        exceedance.limit_value = evaluation["limit"]
+        exceedance.exceed_ratio = evaluation["ratio"]
+        exceedance.level = evaluation["level"]
+        exceedance.measured_at = record.measured_at
+        if was_revoked:
+            # 修正后重新超标: 撤销作废, 但需重新复核, 历史标注保留在记录与事件流中
+            exceedance.status = "pending"
+            exceedance.revision += 1
+            exceedance.log_event("reinstated", actor=actor,
+                                 note="数据修正后重新判定超标, 记录重新进入待标注")
+            return "reinstated"
+        if changed:
+            exceedance.revision += 1
+            exceedance.log_event("corrected", actor=actor,
+                                 note="数据修正后仍超标, 判定结果已更新")
+            return "corrected"
+        return None
+
+    if exceedance is not None and exceedance.status != "revoked":
+        # 修正后不再超标: 不删除记录, 标注痕迹随记录保留
+        exceedance.status = "revoked"
+        exceedance.revision += 1
+        exceedance.log_event("revoked", actor=actor,
+                             note="数据修正后不再超标, 记录撤销, 标注痕迹保留")
+        return "revoked"
+    return None
 
 
 def delete_measurement(measurement):

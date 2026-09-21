@@ -3,13 +3,18 @@ from datetime import datetime
 
 from sqlalchemy import cast, func, or_
 
-from ..domain.constants import EXCEEDANCE_LEVEL_LABELS, EXCEEDANCE_STATUS_LABELS
+from ..domain.constants import (
+    EXCEEDANCE_ANNOTATABLE_STATUSES,
+    EXCEEDANCE_LEVEL_LABELS,
+    EXCEEDANCE_STATUS_LABELS,
+)
 from ..errors import NotFoundError, ValidationError
 from ..extensions import db
 from ..models import Exceedance, Measurement, Station
 from ..models.base import iso
 
-STATUS_CHOICES = tuple(EXCEEDANCE_STATUS_LABELS.keys())
+# 人工标注只允许在待标注/已确认/已忽略之间流转; 已撤销只能由数据修正触发
+STATUS_CHOICES = EXCEEDANCE_ANNOTATABLE_STATUSES
 LEVEL_CHOICES = tuple(EXCEEDANCE_LEVEL_LABELS.keys())
 
 
@@ -103,6 +108,11 @@ def exceedance_query(args):
 
 def annotate(exceedance, status=None, note=None, annotator=None, level=None):
     """Apply a manual annotation to an exceedance record."""
+    if exceedance.status == "revoked":
+        raise ValidationError(
+            "该记录已因数据修正撤销, 不能标注; 如需恢复请修正监测数据使其重新超标",
+            fields={"status": "revoked"},
+        )
     if status is not None:
         if status not in STATUS_CHOICES:
             raise ValidationError(
@@ -134,6 +144,11 @@ def annotate(exceedance, status=None, note=None, annotator=None, level=None):
         exceedance.annotator = annotator or "未署名"
         exceedance.annotated_at = datetime.now()
 
+    exceedance.log_event(
+        "annotated",
+        actor=exceedance.annotator,
+        note=note or None,
+    )
     db.session.commit()
     return exceedance
 
@@ -143,13 +158,23 @@ def annotate_batch(ids, status, note=None, annotator=None, level=None):
     ids = list(dict.fromkeys(int(item) for item in ids))
     if not ids:
         raise ValidationError("请至少选择一条超标记录", fields={"ids": "empty"})
+    if status not in STATUS_CHOICES:
+        raise ValidationError(
+            "标注状态取值不合法, 可选: %s" % ", ".join(STATUS_CHOICES),
+            fields={"status": "unknown"},
+        )
 
     records = Exceedance.query.filter(Exceedance.id.in_(ids)).all()
     found = {record.id for record in records}
     missing = [item for item in ids if item not in found]
 
     updated = []
+    skipped = []
     for record in records:
+        if record.status == "revoked":
+            # 已撤销记录由数据修正驱动, 不参与人工批量标注, 避免覆盖处置痕迹
+            skipped.append(record.id)
+            continue
         annotate_silent = {
             "status": status if status is not None else record.status,
             "level": level if level is not None else record.level,
@@ -171,10 +196,16 @@ def annotate_batch(ids, status, note=None, annotator=None, level=None):
         else:
             record.annotator = annotator or record.annotator or "未署名"
             record.annotated_at = datetime.now()
+        record.log_event(
+            "annotated",
+            actor=record.annotator,
+            note=(note or "").strip() or None,
+        )
         updated.append(record.id)
 
     db.session.commit()
-    return {"updated": len(updated), "updated_ids": updated, "missing": missing}
+    return {"updated": len(updated), "updated_ids": updated, "missing": missing,
+            "skipped": skipped}
 
 
 def summary(args):

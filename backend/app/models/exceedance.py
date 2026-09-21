@@ -7,6 +7,7 @@ from ..domain.constants import (
 )
 from ..extensions import db
 from .base import TimestampMixin, iso
+from .exceedance_event import ExceedanceEvent
 
 
 class Exceedance(TimestampMixin, db.Model):
@@ -33,9 +34,34 @@ class Exceedance(TimestampMixin, db.Model):
     annotator = db.Column(db.String(64))
     annotated_at = db.Column(db.DateTime)
     measured_at = db.Column(db.DateTime, nullable=False, index=True)
+    # 判定轮次: 每次数据修正导致重新判定时 +1, 用于定位结论变化对应的修正
+    revision = db.Column(db.Integer, nullable=False, default=1)
 
     measurement = db.relationship("Measurement", back_populates="exceedance")
     station = db.relationship("Station", back_populates="exceedances")
+    events = db.relationship(
+        "ExceedanceEvent",
+        back_populates="exceedance",
+        cascade="all, delete-orphan",
+        order_by="ExceedanceEvent.id",
+    )
+
+    def log_event(self, event, actor=None, note=None):
+        """Append a trace entry capturing the state right after ``event``."""
+        entry = ExceedanceEvent(
+            exceedance=self,
+            event=event,
+            revision=self.revision,
+            actor=actor,
+            status=self.status,
+            level=self.level,
+            value=self.value,
+            limit_value=self.limit_value,
+            exceed_ratio=self.exceed_ratio,
+            note=note,
+        )
+        db.session.add(entry)
+        return entry
 
     def to_dict(self, include_relations=False):
         payload = {
@@ -56,6 +82,7 @@ class Exceedance(TimestampMixin, db.Model):
             "note": self.note,
             "annotator": self.annotator,
             "annotated_at": iso(self.annotated_at),
+            "revision": self.revision,
             "measured_at": iso(self.measured_at),
             "created_at": iso(self.created_at),
             "updated_at": iso(self.updated_at),
@@ -65,6 +92,8 @@ class Exceedance(TimestampMixin, db.Model):
         }
         if include_relations and self.measurement:
             payload["measurement"] = self.measurement.to_dict(include_station=True)
+        if include_relations:
+            payload["events"] = [event.to_dict() for event in self.events]
         return payload
 
     def __repr__(self):

@@ -1,4 +1,5 @@
 """监测数据录入接口测试."""
+from app.extensions import db
 from app.models import Exceedance, Measurement
 
 
@@ -30,9 +31,13 @@ def test_duplicate_entry_is_reported_as_conflict(client, station, entry_payload)
     assert Measurement.query.count() == 3
 
 
-def test_overwrite_updates_record_and_clears_exceedance(client, station, entry_payload):
-    client.post("/api/measurements/entries", json=entry_payload(station.id))
-    assert Exceedance.query.count() == 1
+def test_overwrite_below_limit_revokes_exceedance_but_keeps_trace(client, station, entry_payload):
+    created = client.post("/api/measurements/entries", json=entry_payload(station.id)).get_json()
+    exceedance_id = created["exceedances"][0]["id"]
+    client.patch(
+        "/api/exceedances/%d" % exceedance_id,
+        json={"status": "confirmed", "note": "复核确认超标", "annotator": "王敏"},
+    )
 
     response = client.post(
         "/api/measurements/entries",
@@ -47,8 +52,84 @@ def test_overwrite_updates_record_and_clears_exceedance(client, station, entry_p
     assert body["summary"]["created_count"] == 0
     assert body["summary"]["updated_count"] == 1
     assert body["summary"]["exceeded_count"] == 0
+    assert body["summary"]["revoked_count"] == 1
+    assert body["revoked_exceedances"][0]["id"] == exceedance_id
     assert Measurement.query.filter_by(pollutant="SO2").one().is_exceeded is False
-    assert Exceedance.query.count() == 0
+
+    # 记录不删除: 状态转为已撤销, 标注痕迹保留
+    record = db.session.get(Exceedance, exceedance_id)
+    assert Exceedance.query.count() == 1
+    assert record.status == "revoked"
+    assert record.revision == 2
+    assert record.annotator == "王敏"
+    assert record.note == "复核确认超标"
+    assert record.annotated_at is not None
+
+    detail = client.get("/api/exceedances/%d" % exceedance_id).get_json()
+    events = [(item["event"], item["status"]) for item in detail["events"]]
+    assert events == [("created", "pending"), ("annotated", "confirmed"), ("revoked", "revoked")]
+    # 撤销事件能定位到是哪一次修正引起的 (操作人 = 本次修正的录入人)
+    assert detail["events"][-1]["actor"] == "测试员"
+    assert detail["events"][-1]["revision"] == 2
+
+
+def test_overwrite_back_above_limit_reinstates_record(client, station, entry_payload):
+    created = client.post("/api/measurements/entries", json=entry_payload(station.id)).get_json()
+    exceedance_id = created["exceedances"][0]["id"]
+    client.patch(
+        "/api/exceedances/%d" % exceedance_id,
+        json={"status": "confirmed", "note": "复核确认超标", "annotator": "王敏"},
+    )
+    client.post(
+        "/api/measurements/entries",
+        json=entry_payload(station.id, overwrite=True, entries=[{"pollutant": "SO2", "value": 120.0}]),
+    )
+    assert db.session.get(Exceedance, exceedance_id).status == "revoked"
+
+    response = client.post(
+        "/api/measurements/entries",
+        json=entry_payload(station.id, overwrite=True, entries=[{"pollutant": "SO2", "value": 800.0}]),
+    )
+    body = response.get_json()
+    assert body["summary"]["reinstated_count"] == 1
+    assert body["reinstated_exceedances"][0]["id"] == exceedance_id
+
+    # 重新超标后回到待标注, 但此前的标注人与说明仍然可查
+    record = db.session.get(Exceedance, exceedance_id)
+    assert record.status == "pending"
+    assert record.revision == 3
+    assert record.annotator == "王敏"
+    assert record.note == "复核确认超标"
+
+    detail = client.get("/api/exceedances/%d" % exceedance_id).get_json()
+    assert [item["event"] for item in detail["events"]] == [
+        "created", "annotated", "revoked", "reinstated",
+    ]
+
+
+def test_correction_while_still_exceeded_keeps_annotation_and_logs_event(
+    client, station, entry_payload
+):
+    created = client.post("/api/measurements/entries", json=entry_payload(station.id)).get_json()
+    exceedance_id = created["exceedances"][0]["id"]
+    client.patch(
+        "/api/exceedances/%d" % exceedance_id,
+        json={"status": "confirmed", "note": "复核确认超标", "annotator": "王敏"},
+    )
+
+    client.post(
+        "/api/measurements/entries",
+        json=entry_payload(station.id, overwrite=True, entries=[{"pollutant": "SO2", "value": 650.0}]),
+    )
+    record = db.session.get(Exceedance, exceedance_id)
+    assert record.status == "confirmed"  # 仍超标, 人工结论不被修正覆盖
+    assert record.value == 650.0
+    assert record.level == "light"
+    assert record.revision == 2
+
+    detail = client.get("/api/exceedances/%d" % exceedance_id).get_json()
+    assert [item["event"] for item in detail["events"]] == ["created", "annotated", "corrected"]
+    assert detail["events"][-1]["value"] == 650.0
 
 
 def test_preview_validates_without_writing(client, station, entry_payload):

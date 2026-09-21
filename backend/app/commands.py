@@ -9,7 +9,10 @@ def register_commands(app):
     @app.cli.command("init-db")
     def init_db():
         """Create database tables."""
+        from .seed import ensure_schema_upgrades
+
         db.create_all()
+        ensure_schema_upgrades()
         click.echo("数据库表已创建")
 
     @app.cli.command("seed")

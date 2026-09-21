@@ -16,7 +16,24 @@ STATION_STATUS_LABELS = {"active": "运行中", "maintenance": "维护中", "off
 
 EXCEEDANCE_LEVEL_LABELS = {"light": "轻度超标", "moderate": "中度超标", "severe": "重度超标"}
 
-EXCEEDANCE_STATUS_LABELS = {"pending": "待标注", "confirmed": "已确认", "ignored": "已忽略"}
+EXCEEDANCE_STATUS_LABELS = {
+    "pending": "待标注",
+    "confirmed": "已确认",
+    "ignored": "已忽略",
+    "revoked": "已撤销",
+}
+
+# 允许人工标注的目标状态; revoked 只能由数据修正触发, 不能手工设置
+EXCEEDANCE_ANNOTATABLE_STATUSES = ("pending", "confirmed", "ignored")
+
+# 超标记录处置痕迹(事件)类型
+EXCEEDANCE_EVENT_LABELS = {
+    "created": "判定超标建单",
+    "corrected": "数据修正(仍超标)",
+    "revoked": "修正后不再超标",
+    "reinstated": "修正后重新超标",
+    "annotated": "人工标注",
+}
 
 
 def as_options(label_map):
