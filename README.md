@@ -11,12 +11,13 @@
 | 运行概览 | `/overview` | 监测点规模、数据总量、超标与待标注统计、近 7 日数据量趋势、待办超标列表 |
 | 监测点台账 | `/stations` | 台账增删改查、区域/类型/状态筛选、点位详情与分因子统计、级联清理关联数据 |
 | 监测数据录入 | `/measurements` | 按“监测点 + 时刻 + 周期”成组录入多因子浓度、超标校验预览、重复数据覆盖、录入结果回执 |
-| 超标记录标注 | `/exceedances` | 超标自动建单、单条/批量标注(确认 / 忽略 / 重置)、等级人工修正、标注留痕与统计 |
+| 超标记录标注 | `/exceedances` | 超标自动建单、单条/批量标注(确认 / 忽略 / 重置)、等级人工修正、修正-标注全程留痕与统计 |
 | 数据查询 | `/query` | 多条件组合检索、聚合统计(按因子/站点/区域/日/月等)、分页浏览、CSV 导出 |
 
 设计要点:
 
-- **超标自动判定**: 数据写入时即按“因子 + 数据周期”取用限值, 计算超标倍数并分级, 同步生成待标注超标记录; 修正数据后超标记录自动更新或撤销。
+- **超标自动判定**: 数据写入时即按“因子 + 数据周期”取用限值, 计算超标倍数并分级, 同步生成待标注超标记录; 修正数据后重新判定, 但**超标记录不删除**: 不再超标时置为“已撤销”, 已确认/已忽略的标注结论、标注人与处置时间全部保留, 并标记“待复核”。
+- **修正与处置痕迹分离**: 监测数据每次覆盖修正都会递增 `revision` 版本号; 超标记录的每次建单 / 修正 / 标注 / 撤销 / 恢复都会追加一条 `exceedance_events` 留痕(操作人、前后数值与状态、对应数据版本), 结论变化可归属到具体某一次修正, 已处理事项不会被静默作废。
 - **业务规则集中在后端**: 限值与分级规则位于 `backend/app/domain/`, 前端仅做展示与前置校验, 避免规则分叉。
 - **模块化组织**: 后端按 `api / services / models / domain / utils` 分层; 前端每个业务模块独占目录, 公共能力沉淀在 `components/`、`hooks/`、`api/`。
 
@@ -28,7 +29,7 @@
 | 数据库 | SQLite(默认, 零依赖) / PostgreSQL 16(可选, compose 覆盖文件) |
 | 前端 | React 18 · React Router 6 · Vite 7 · Axios · 原生 CSS(设计令牌 + 组件类) |
 | 部署 | Docker 多阶段构建 · Nginx 静态托管与 `/api` 反向代理 · docker compose |
-| 测试 | Pytest(43 个后端用例: 接口 + 领域规则) |
+| 测试 | Pytest(52 个后端用例: 接口 + 领域规则) |
 
 ## 目录结构
 
@@ -140,6 +141,11 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --buil
 - **分级**: 超标倍数 = 监测值 / 限值; `1.0 ~ 1.5 倍` 为轻度超标, `1.5 ~ 2.0 倍` 为中度超标, `≥ 2.0 倍` 为重度超标。
 - **无 1 小时限值的因子**(PM2.5、PM10 小时值)仅记录数值, 不参与超标判定, 避免误报。
 - **标注状态**: `待标注(pending)` 由系统自动创建, 人工标注为 `已确认(confirmed)` 或 `已忽略(ignored)`; 确认与忽略都必须填写标注说明, 用于后续追溯。
+- **数据修正与留痕**: 覆盖修正监测数据会重新判定并递增数据版本号 `revision`, 同时向 `exceedance_events` 追加留痕事件(修正人、前后数值/等级/状态、数据版本):
+  - 修正后**仍超标**: 更新数值快照; 若此前已确认/已忽略, 标注原样保留并置“待复核”(`annotation_stale`), 人工重新标注后解除;
+  - 修正后**不再超标**: 记录置为 `已撤销(revoked)` 而非删除, 标注痕迹完整保留, 已撤销记录不能再标注(批量标注自动跳过并明示);
+  - 撤销后**再次超标**: 同一条记录恢复为待标注, 历史标注仍可见并标记“待复核”;
+  - 显式删除监测数据仍会级联删除其超标记录(含留痕), 删除监测点同理。
 
 ## API 概览
 
@@ -160,8 +166,8 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --buil
 | POST | `/api/measurements/preview` | 超标校验预览(不写库) |
 | DELETE | `/api/measurements/{id}` | 删除监测数据 |
 | GET | `/api/measurements/export` | 按条件导出 CSV |
-| GET | `/api/exceedances` | 超标记录查询(含筛选统计) |
-| GET | `/api/exceedances/{id}` | 超标记录详情(含关联监测数据) |
+| GET | `/api/exceedances` | 超标记录查询(含筛选统计, 支持 `stale=true` 筛待复核) |
+| GET | `/api/exceedances/{id}` | 超标记录详情(含关联监测数据与处置留痕 events) |
 | PATCH | `/api/exceedances/{id}` | 单条标注 |
 | POST | `/api/exceedances/annotations` | 批量标注 |
 | GET | `/api/exceedances/summary` | 超标统计(状态/等级/高发因子/站点排名) |
@@ -205,10 +211,11 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --buil
 | 表 | 关键字段 | 说明 |
 | --- | --- | --- |
 | `stations` | `code`(唯一) `name` `area` `station_type` `status` `longitude/latitude` `installed_at` | 监测点台账 |
-| `measurements` | `station_id` `pollutant` `period` `value` `limit_value` `exceed_ratio` `is_exceeded` `measured_at` `data_source` `recorder` | 监测数据; `(station_id, pollutant, period, measured_at)` 唯一 |
-| `exceedances` | `measurement_id`(唯一) `status` `level` `note` `annotator` `annotated_at` | 超标记录与人工标注 |
+| `measurements` | `station_id` `pollutant` `period` `value` `limit_value` `exceed_ratio` `is_exceeded` `measured_at` `data_source` `recorder` `revision` | 监测数据; `(station_id, pollutant, period, measured_at)` 唯一; `revision` 为修正版本号, 覆盖修正时递增 |
+| `exceedances` | `measurement_id`(唯一) `status` `level` `note` `annotator` `annotated_at` `annotation_stale` | 超标记录与人工标注; 重新判定不删除, 不再超标时置 `revoked`; `annotation_stale` 表示标注后数据被修正、结论待复核 |
+| `exceedance_events` | `exceedance_id` `event_type` `actor` `note` `measurement_id` `measurement_revision` 前后快照字段 | 处置留痕: 建单/修正/标注/撤销/恢复, 记录操作人与前后数值、等级、状态及数据版本 |
 
-删除监测点会级联清理其监测数据与超标记录; 删除监测数据会同时删除对应超标记录。
+删除监测点会级联清理其监测数据与超标记录; 显式删除监测数据会同时删除对应超标记录(修正/覆盖不会删除, 见上)。
 
 ## 配置项
 
@@ -228,7 +235,7 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --buil
 
 ```bash
 cd backend
-python -m pytest -q          # 43 个用例: 台账 CRUD/级联、录入与超标判定、标注规则、查询统计与导出、元数据接口
+python -m pytest -q          # 52 个用例: 台账 CRUD/级联、录入与超标判定、标注规则、修正留痕、查询统计与导出、元数据接口
 
 cd frontend
 npm run build                # 生产构建校验
@@ -246,6 +253,7 @@ python -m flask --app wsgi reset-db   # 重置数据库并重建演示数据
 
 - **端口被占用**: 后端改 `PORT=5001 python run.py`(同时调整 `VITE_PROXY_TARGET`), 或修改 compose 的端口映射。
 - **想清空演示数据**: `python -m flask --app wsgi reset-db --empty`, 或 `docker compose down -v` 后重新启动。
+- **升级后缺少新表/新列**(如 `exceedance_events`、`revision`、`annotation_stale`): 项目未引入迁移框架, 执行 `python -m flask --app wsgi reset-db` 重建即可(会清空业务数据, 请先在意外备份)。
 - **SQLite 文件位置**: 本地开发为 `backend/instance/air_monitor.db`; Docker 部署为数据卷 `air-monitor-data` 中的 `/data/air_monitor.db`。
 - **前端页面 404 / 刷新报错**: Nginx 已配置 SPA 回退(`try_files ... /index.html`), 自定义部署时需保留该配置。
 - **时区**: 系统按“本地墙钟时间”存储与展示监测时间, 部署时请保持后端 `TIMEZONE` 与业务所在地一致。

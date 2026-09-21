@@ -30,10 +30,15 @@ export default function ExceedanceTable({
       title: '监测值 / 限值',
       className: 'cell-nowrap',
       render: (row) => (
-        <span>
-          <span className="danger-text strong">{formatNumber(row.value)}</span>
-          <span className="muted"> / {formatNumber(row.limit_value)} {row.unit || ''}</span>
-        </span>
+        <div>
+          <span>
+            <span className="danger-text strong">{formatNumber(row.value)}</span>
+            <span className="muted"> / {formatNumber(row.limit_value)} {row.unit || ''}</span>
+          </span>
+          {row.measurement_revision > 1 ? (
+            <div className="small muted">第 {row.measurement_revision} 次修正</div>
+          ) : null}
+        </div>
       )
     },
     {
@@ -51,7 +56,20 @@ export default function ExceedanceTable({
     {
       key: 'status',
       title: '标注状态',
-      render: (row) => <Tag tone={EXCEEDANCE_STATUS_TONE[row.status]}>{row.status_label}</Tag>
+      render: (row) => (
+        <div className="stack" style={{ gap: 4 }}>
+          <div>
+            <Tag tone={EXCEEDANCE_STATUS_TONE[row.status]}>{row.status_label}</Tag>
+          </div>
+          {row.annotation_stale ? (
+            <div>
+              <Tag tone="warning" title="标注后监测数据被修正过, 原结论基于旧数据, 请复核">
+                数据已修正·待复核
+              </Tag>
+            </div>
+          ) : null}
+        </div>
+      )
     },
     {
       key: 'note',
@@ -71,11 +89,16 @@ export default function ExceedanceTable({
       key: 'actions',
       title: '操作',
       align: 'right',
-      render: (row) => (
-        <button type="button" className="btn btn-sm btn-primary" onClick={() => onOpen(row)}>
-          标注
-        </button>
-      )
+      render: (row) =>
+        row.status === 'revoked' ? (
+          <button type="button" className="btn btn-sm" onClick={() => onOpen(row)}>
+            留痕
+          </button>
+        ) : (
+          <button type="button" className="btn btn-sm btn-primary" onClick={() => onOpen(row)}>
+            标注
+          </button>
+        )
     }
   ]
 

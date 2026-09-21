@@ -9,12 +9,28 @@ export const NAV_ITEMS = [
 export const PAGE_SIZE_OPTIONS = [10, 20, 50, 100]
 
 export const STATION_STATUS_TONE = { active: 'success', maintenance: 'warning', offline: 'neutral' }
-export const EXCEEDANCE_STATUS_TONE = { pending: 'warning', confirmed: 'danger', ignored: 'neutral' }
+export const EXCEEDANCE_STATUS_TONE = { pending: 'warning', confirmed: 'danger', ignored: 'neutral', revoked: 'info' }
 export const EXCEEDANCE_LEVEL_TONE = { light: 'info', moderate: 'warning', severe: 'danger' }
 export const DATA_SOURCE_TONE = { manual: 'primary', device: 'info', import: 'neutral' }
 
 export const EXCEEDANCE_LEVEL_LABELS = { light: '轻度超标', moderate: '中度超标', severe: '重度超标' }
-export const EXCEEDANCE_STATUS_LABELS = { pending: '待标注', confirmed: '已确认', ignored: '已忽略' }
+export const EXCEEDANCE_STATUS_LABELS = { pending: '待标注', confirmed: '已确认', ignored: '已忽略', revoked: '已撤销' }
+
+// 超标记录留痕事件(与后端 EXCEEDANCE_EVENT_LABELS 对应)
+export const EXCEEDANCE_EVENT_LABELS = {
+  created: '自动建单',
+  corrected: '数据修正',
+  annotated: '人工标注',
+  revoked: '判定撤销',
+  restored: '恢复超标'
+}
+export const EXCEEDANCE_EVENT_TONE = {
+  created: 'primary',
+  corrected: 'warning',
+  annotated: 'success',
+  revoked: 'neutral',
+  restored: 'info'
+}
 
 export const POLLUTANT_CODE_LABELS = {
   PM25: 'PM2.5',

@@ -108,7 +108,12 @@ def test_exceedance_filters_and_summary(client, station, entry_payload):
 def test_exceedance_options_and_export(client, station, entry_payload):
     _make_exceedances(client, station, entry_payload)
     options = client.get("/api/exceedances/options").get_json()
-    assert {item["value"] for item in options["statuses"]} == {"pending", "confirmed", "ignored"}
+    assert {item["value"] for item in options["statuses"]} == {
+        "pending",
+        "confirmed",
+        "ignored",
+        "revoked",
+    }
 
     csv_body = client.get("/api/exceedances/export").get_data(as_text=True)
     assert csv_body.startswith("\ufeff站点编码")

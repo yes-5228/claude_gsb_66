@@ -3,13 +3,18 @@ from datetime import datetime
 
 from sqlalchemy import cast, func, or_
 
-from ..domain.constants import EXCEEDANCE_LEVEL_LABELS, EXCEEDANCE_STATUS_LABELS
+from ..domain.constants import (
+    ANNOTATABLE_EXCEEDANCE_STATUSES,
+    EXCEEDANCE_LEVEL_LABELS,
+    EXCEEDANCE_STATUS_LABELS,
+)
 from ..errors import NotFoundError, ValidationError
 from ..extensions import db
-from ..models import Exceedance, Measurement, Station
+from ..models import Exceedance, ExceedanceEvent, Measurement, Station
 from ..models.base import iso
 
-STATUS_CHOICES = tuple(EXCEEDANCE_STATUS_LABELS.keys())
+# 人工标注只允许在待标注/已确认/已忽略之间流转; revoked 由系统判定产生
+STATUS_CHOICES = ANNOTATABLE_EXCEEDANCE_STATUSES
 LEVEL_CHOICES = tuple(EXCEEDANCE_LEVEL_LABELS.keys())
 
 
@@ -88,6 +93,8 @@ def exceedance_query(args):
         query = query.filter(Exceedance.annotated_at.isnot(None))
     elif str(args.get("annotated", "")).strip().lower() in {"0", "false", "no"}:
         query = query.filter(Exceedance.annotated_at.is_(None))
+    if str(args.get("stale", "")).strip().lower() in {"1", "true", "yes"}:
+        query = query.filter(Exceedance.annotation_stale.is_(True))
 
     order = (args.get("order") or "desc").lower()
     sort_key = args.get("sort") or "measured_at"
@@ -101,8 +108,42 @@ def exceedance_query(args):
     return query.order_by(primary, Exceedance.id.desc())
 
 
+def _log_annotation(exceedance, prev_status, prev_level, annotator, note):
+    """Record an annotation event so manual handling is traceable."""
+    exceedance.events.append(
+        ExceedanceEvent(
+            event_type="annotated",
+            actor=annotator,
+            note=note,
+            measurement_id=exceedance.measurement_id,
+            measurement_revision=exceedance.measurement.revision
+            if exceedance.measurement
+            else None,
+            prev_value=exceedance.value,
+            prev_exceed_ratio=exceedance.exceed_ratio,
+            prev_level=prev_level,
+            prev_status=prev_status,
+            value=exceedance.value,
+            limit_value=exceedance.limit_value,
+            exceed_ratio=exceedance.exceed_ratio,
+            level=exceedance.level,
+            status=exceedance.status,
+        )
+    )
+
+
+def _ensure_annotatable(exceedance):
+    if exceedance.status == "revoked":
+        raise ValidationError(
+            "该记录已因数据修正撤销(监测值不再超标), 不能标注; 如需恢复请先修正监测数据",
+            fields={"status": "revoked"},
+        )
+
+
 def annotate(exceedance, status=None, note=None, annotator=None, level=None):
     """Apply a manual annotation to an exceedance record."""
+    _ensure_annotatable(exceedance)
+    prev_status, prev_level = exceedance.status, exceedance.level
     if status is not None:
         if status not in STATUS_CHOICES:
             raise ValidationError(
@@ -134,6 +175,10 @@ def annotate(exceedance, status=None, note=None, annotator=None, level=None):
         exceedance.annotator = annotator or "未署名"
         exceedance.annotated_at = datetime.now()
 
+    # 人工复核后, "数据已修正待复核" 标记解除
+    exceedance.annotation_stale = False
+    _log_annotation(exceedance, prev_status, prev_level,
+                    annotator or exceedance.annotator or "未署名", exceedance.note)
     db.session.commit()
     return exceedance
 
@@ -149,7 +194,12 @@ def annotate_batch(ids, status, note=None, annotator=None, level=None):
     missing = [item for item in ids if item not in found]
 
     updated = []
+    skipped = []
     for record in records:
+        if record.status == "revoked":
+            # 已撤销记录不允许标注, 跳过并明示, 不静默改写
+            skipped.append(record.id)
+            continue
         annotate_silent = {
             "status": status if status is not None else record.status,
             "level": level if level is not None else record.level,
@@ -162,6 +212,7 @@ def annotate_batch(ids, status, note=None, annotator=None, level=None):
                 % EXCEEDANCE_STATUS_LABELS.get(annotate_silent["status"], annotate_silent["status"]),
                 fields={"note": "required"},
             )
+        prev_status, prev_level = record.status, record.level
         record.status = annotate_silent["status"]
         record.level = annotate_silent["level"]
         if (note or "").strip():
@@ -171,10 +222,14 @@ def annotate_batch(ids, status, note=None, annotator=None, level=None):
         else:
             record.annotator = annotator or record.annotator or "未署名"
             record.annotated_at = datetime.now()
+        record.annotation_stale = False
+        _log_annotation(record, prev_status, prev_level,
+                        annotator or record.annotator or "未署名", record.note)
         updated.append(record.id)
 
     db.session.commit()
-    return {"updated": len(updated), "updated_ids": updated, "missing": missing}
+    return {"updated": len(updated), "updated_ids": updated, "missing": missing,
+            "skipped": skipped}
 
 
 def summary(args):
@@ -182,7 +237,8 @@ def summary(args):
     base = exceedance_query(args)
     subquery = base.with_entities(Exceedance.id, Exceedance.station_id,
                                   Exceedance.status, Exceedance.level,
-                                  Exceedance.pollutant, Exceedance.exceed_ratio).subquery()
+                                  Exceedance.pollutant, Exceedance.exceed_ratio,
+                                  Exceedance.annotation_stale).subquery()
 
     by_status = {
         status: {"key": status, "label": label, "count": 0}
@@ -240,9 +296,19 @@ def summary(args):
         func.avg(subquery.c.exceed_ratio),
     ).one()
 
+    stale_count = int(
+        db.session.query(func.count())
+        .select_from(subquery)
+        .filter(subquery.c.annotation_stale.is_(True))
+        .scalar()
+        or 0
+    )
+
     return {
         "total": int(totals[0] or 0),
         "pending": by_status["pending"]["count"],
+        "revoked": by_status["revoked"]["count"],
+        "stale": stale_count,
         "by_status": list(by_status.values()),
         "by_level": list(by_level.values()),
         "top_pollutants": top_pollutants,

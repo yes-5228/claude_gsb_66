@@ -32,10 +32,19 @@ class Exceedance(TimestampMixin, db.Model):
     note = db.Column(db.Text)
     annotator = db.Column(db.String(64))
     annotated_at = db.Column(db.DateTime)
+    # 标注后监测数据又被修正时为 True: 当前标注结论基于旧数据, 需要人工复核
+    annotation_stale = db.Column(db.Boolean, nullable=False, default=False)
     measured_at = db.Column(db.DateTime, nullable=False, index=True)
 
     measurement = db.relationship("Measurement", back_populates="exceedance")
     station = db.relationship("Station", back_populates="exceedances")
+    events = db.relationship(
+        "ExceedanceEvent",
+        back_populates="exceedance",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="ExceedanceEvent.id",
+    )
 
     def to_dict(self, include_relations=False):
         payload = {
@@ -56,7 +65,9 @@ class Exceedance(TimestampMixin, db.Model):
             "note": self.note,
             "annotator": self.annotator,
             "annotated_at": iso(self.annotated_at),
+            "annotation_stale": bool(self.annotation_stale),
             "measured_at": iso(self.measured_at),
+            "measurement_revision": self.measurement.revision if self.measurement else None,
             "created_at": iso(self.created_at),
             "updated_at": iso(self.updated_at),
             "station_name": self.station.name if self.station else None,
@@ -65,6 +76,8 @@ class Exceedance(TimestampMixin, db.Model):
         }
         if include_relations and self.measurement:
             payload["measurement"] = self.measurement.to_dict(include_station=True)
+        if include_relations:
+            payload["events"] = [event.to_dict() for event in self.events]
         return payload
 
     def __repr__(self):

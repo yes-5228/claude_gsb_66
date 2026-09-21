@@ -1,6 +1,6 @@
 import DataTable from '../../../components/common/DataTable.jsx'
 import Tag from '../../../components/common/Tag.jsx'
-import { DATA_SOURCE_TONE, EXCEEDANCE_STATUS_TONE } from '../../../constants/index.js'
+import { DATA_SOURCE_TONE, EXCEEDANCE_STATUS_LABELS, EXCEEDANCE_STATUS_TONE } from '../../../constants/index.js'
 import { formatDateTime, formatNumber } from '../../../utils/format.js'
 
 export default function QueryResultTable({ rows, loading }) {
@@ -32,7 +32,7 @@ export default function QueryResultTable({ rows, loading }) {
       render: (row) =>
         row.exceedance_status ? (
           <Tag tone={EXCEEDANCE_STATUS_TONE[row.exceedance_status]}>
-            {row.exceedance_status === 'pending' ? '待标注' : row.exceedance_status === 'confirmed' ? '已确认' : '已忽略'}
+            {EXCEEDANCE_STATUS_LABELS[row.exceedance_status] || row.exceedance_status}
           </Tag>
         ) : (
           <span className="muted">-</span>

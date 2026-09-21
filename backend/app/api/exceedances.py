@@ -1,7 +1,12 @@
 """超标记录标注 API."""
 from flask import Blueprint, current_app, request
 
-from ..domain.constants import EXCEEDANCE_LEVEL_LABELS, EXCEEDANCE_STATUS_LABELS, PERIOD_LABELS
+from ..domain.constants import (
+    ANNOTATABLE_EXCEEDANCE_STATUSES,
+    EXCEEDANCE_LEVEL_LABELS,
+    EXCEEDANCE_STATUS_LABELS,
+    PERIOD_LABELS,
+)
 from ..services import exceedance_service
 from ..utils.pagination import paginate_query
 from ..utils.validation import Validator
@@ -60,6 +65,8 @@ def export_exceedances():
         ("标注人", "annotator"),
         ("标注时间", lambda row: row.annotated_at.strftime("%Y-%m-%d %H:%M")
             if row.annotated_at else ""),
+        ("数据修正次数", lambda row: (row.measurement.revision or 1) if row.measurement else ""),
+        ("标注待复核", lambda row: "是" if row.annotation_stale else "否"),
     ]
     return csv_response(rows, columns, "exceedance_records")
 
@@ -77,7 +84,7 @@ def annotate_exceedance(exceedance_id):
     data = json_payload()
     validator = Validator(data)
     status = validator.choice(
-        "status", "标注状态", choices=tuple(EXCEEDANCE_STATUS_LABELS.keys()), required=False
+        "status", "标注状态", choices=ANNOTATABLE_EXCEEDANCE_STATUSES, required=False
     )
     level = validator.choice(
         "level", "超标等级", choices=tuple(EXCEEDANCE_LEVEL_LABELS.keys()), required=False
@@ -98,7 +105,7 @@ def batch_annotate():
     data = json_payload()
     validator = Validator(data)
     status = validator.choice(
-        "status", "标注状态", choices=tuple(EXCEEDANCE_STATUS_LABELS.keys()), required=True
+        "status", "标注状态", choices=ANNOTATABLE_EXCEEDANCE_STATUSES, required=True
     )
     level = validator.choice(
         "level", "超标等级", choices=tuple(EXCEEDANCE_LEVEL_LABELS.keys()), required=False
@@ -109,3 +116,4 @@ def batch_annotate():
 
     ids = list_payload("ids", data)
     return exceedance_service.annotate_batch(ids, status, note=note, annotator=annotator, level=level)
+

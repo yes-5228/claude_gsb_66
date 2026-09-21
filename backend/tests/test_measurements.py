@@ -30,7 +30,7 @@ def test_duplicate_entry_is_reported_as_conflict(client, station, entry_payload)
     assert Measurement.query.count() == 3
 
 
-def test_overwrite_updates_record_and_clears_exceedance(client, station, entry_payload):
+def test_overwrite_updates_record_and_revokes_exceedance(client, station, entry_payload):
     client.post("/api/measurements/entries", json=entry_payload(station.id))
     assert Exceedance.query.count() == 1
 
@@ -47,8 +47,15 @@ def test_overwrite_updates_record_and_clears_exceedance(client, station, entry_p
     assert body["summary"]["created_count"] == 0
     assert body["summary"]["updated_count"] == 1
     assert body["summary"]["exceeded_count"] == 0
-    assert Measurement.query.filter_by(pollutant="SO2").one().is_exceeded is False
-    assert Exceedance.query.count() == 0
+    measurement = Measurement.query.filter_by(pollutant="SO2").one()
+    assert measurement.is_exceeded is False
+    assert measurement.revision == 2
+
+    # 修正后不再超标: 记录不删除, 置为已撤销并保留留痕
+    exceedance = Exceedance.query.one()
+    assert exceedance.status == "revoked"
+    events = [(event.event_type, event.measurement_revision) for event in exceedance.events]
+    assert events == [("created", 1), ("revoked", 2)]
 
 
 def test_preview_validates_without_writing(client, station, entry_payload):

@@ -16,7 +16,8 @@ const EXCEEDED_OPTIONS = [
 const ANNOTATION_OPTIONS = [
   { value: 'pending', label: '待标注' },
   { value: 'confirmed', label: '已确认' },
-  { value: 'ignored', label: '已忽略' }
+  { value: 'ignored', label: '已忽略' },
+  { value: 'revoked', label: '已撤销' }
 ]
 
 const SOURCE_OPTIONS = [

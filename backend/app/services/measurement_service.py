@@ -3,7 +3,7 @@ from ..domain import exceedance_rules
 from ..domain.standards import get_pollutant
 from ..errors import ConflictError, NotFoundError, ValidationError
 from ..extensions import db
-from ..models import Exceedance, Measurement, Station
+from ..models import Exceedance, ExceedanceEvent, Measurement, Station
 
 
 def get_measurement(measurement_id):
@@ -116,6 +116,8 @@ def record_entries(station_id, measured_at, period, entries, data_source="manual
             record = Measurement(station_id=station.id, pollutant=pollutant, period=period,
                                  measured_at=measured_at)
             db.session.add(record)
+        else:
+            record.revision = (record.revision or 1) + 1
 
         record.value = value
         record.unit = meta["unit"]
@@ -126,6 +128,7 @@ def record_entries(station_id, measured_at, period, entries, data_source="manual
         record.recorder = entry.get("recorder") or recorder
         record.remark = entry.get("remark") or remark
 
+        db.session.flush()  # 先拿到 id / 持久化版本号, 供超标留痕事件引用
         _sync_exceedance(record, meta, evaluation)
         db.session.flush()
         (created if is_new else updated).append(record.to_dict(include_station=True))
@@ -157,11 +160,52 @@ def record_entries(station_id, measured_at, period, entries, data_source="manual
     }
 
 
+def _log_event(exceedance, event_type, record, level, status, actor=None, note=None, prev=None):
+    """Append an audit event to an exceedance, capturing before/after snapshots."""
+    prev = prev or {}
+    exceedance.events.append(
+        ExceedanceEvent(
+            event_type=event_type,
+            actor=actor,
+            note=note,
+            measurement_id=record.id,
+            measurement_revision=record.revision,
+            prev_value=prev.get("value"),
+            prev_exceed_ratio=prev.get("exceed_ratio"),
+            prev_level=prev.get("level"),
+            prev_status=prev.get("status"),
+            value=record.value,
+            limit_value=record.limit_value,
+            exceed_ratio=record.exceed_ratio,
+            level=level,
+            status=status,
+        )
+    )
+
+
+def _snapshot(exceedance):
+    return {
+        "value": exceedance.value,
+        "exceed_ratio": exceedance.exceed_ratio,
+        "level": exceedance.level,
+        "status": exceedance.status,
+    }
+
+
 def _sync_exceedance(record, meta, evaluation):
-    """Create / refresh / drop the exceedance row attached to a measurement."""
+    """Re-judge the exceedance attached to a measurement after entry/correction.
+
+    The exceedance row (and its annotation trail) is never deleted by
+    re-judgement: corrections only change its status/snapshot and append an
+    audit event, so a previously handled record is never silently voided.
+    """
+    exceedance = record.exceedance
+    actor = record.recorder
+    note = record.remark
+
     if evaluation["exceeded"]:
-        if record.exceedance is None:
-            record.exceedance = Exceedance(
+        if exceedance is None:
+            exceedance = Exceedance(
                 station_id=record.station_id,
                 pollutant=record.pollutant,
                 period=record.period,
@@ -172,14 +216,39 @@ def _sync_exceedance(record, meta, evaluation):
                 level=evaluation["level"],
                 status="pending",
             )
-        else:
-            record.exceedance.value = record.value
-            record.exceedance.limit_value = evaluation["limit"]
-            record.exceedance.exceed_ratio = evaluation["ratio"]
-            record.exceedance.level = evaluation["level"]
-            record.exceedance.measured_at = record.measured_at
-    elif record.exceedance is not None:
-        db.session.delete(record.exceedance)
+            record.exceedance = exceedance
+            _log_event(exceedance, "created", record, level=exceedance.level,
+                       status="pending", actor=actor, note=note)
+            return
+
+        prev = _snapshot(exceedance)
+        restored = exceedance.status == "revoked"
+        exceedance.value = record.value
+        exceedance.limit_value = evaluation["limit"]
+        exceedance.exceed_ratio = evaluation["ratio"]
+        exceedance.level = evaluation["level"]
+        exceedance.measured_at = record.measured_at
+        if restored:
+            # 修正后再次超标: 回到待办, 历史标注保留在记录与事件中, 标记待复核
+            exceedance.status = "pending"
+        if exceedance.annotated_at is not None:
+            exceedance.annotation_stale = True
+        _log_event(
+            exceedance,
+            "restored" if restored else "corrected",
+            record,
+            level=exceedance.level,
+            status=exceedance.status,
+            actor=actor,
+            note=note,
+            prev=prev,
+        )
+    elif exceedance is not None and exceedance.status != "revoked":
+        # 修正后不再超标: 不删除记录, 置为已撤销并保留全部标注痕迹
+        prev = _snapshot(exceedance)
+        exceedance.status = "revoked"
+        _log_event(exceedance, "revoked", record, level=None, status="revoked",
+                   actor=actor, note=note, prev=prev)
 
 
 def delete_measurement(measurement):

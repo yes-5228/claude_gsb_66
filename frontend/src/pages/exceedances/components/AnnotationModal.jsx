@@ -5,7 +5,12 @@ import Tag from '../../../components/common/Tag.jsx'
 import { Field, Input, Textarea } from '../../../components/common/FormField.jsx'
 import { Alert, ErrorState, Loading } from '../../../components/common/Feedback.jsx'
 import { useToast } from '../../../components/common/ToastProvider.jsx'
-import { EXCEEDANCE_LEVEL_TONE, EXCEEDANCE_STATUS_TONE } from '../../../constants/index.js'
+import {
+  EXCEEDANCE_EVENT_TONE,
+  EXCEEDANCE_LEVEL_TONE,
+  EXCEEDANCE_STATUS_LABELS,
+  EXCEEDANCE_STATUS_TONE
+} from '../../../constants/index.js'
 import { useAsyncData } from '../../../hooks/useAsyncData.js'
 import { formatDateTime, formatNumber, formatRatio } from '../../../utils/format.js'
 
@@ -14,6 +19,48 @@ const STATUS_CHOICES = [
   { value: 'ignored', label: '忽略记录', hint: '设备异常 / 校准期数据等, 需说明原因' },
   { value: 'pending', label: '保持待标注', hint: '暂不处理, 保留在待办列表' }
 ]
+
+function EventTrail({ events }) {
+  if (!events?.length) return null
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      <div className="field-label">处置与修正留痕</div>
+      <ul className="event-trail">
+        {events.map((event) => (
+          <li key={event.id} className="event-item">
+            <div className="inline" style={{ justifyContent: 'space-between' }}>
+              <span className="inline" style={{ gap: 6 }}>
+                <Tag tone={EXCEEDANCE_EVENT_TONE[event.event_type]}>{event.event_type_label}</Tag>
+                {event.measurement_revision ? (
+                  <span className="small muted">数据版本 v{event.measurement_revision}</span>
+                ) : null}
+              </span>
+              <span className="small muted">
+                {event.actor || '系统'} · {formatDateTime(event.created_at)}
+              </span>
+            </div>
+            <div className="small" style={{ marginTop: 4 }}>
+              {event.prev_status ? (
+                <span className="muted">
+                  {EXCEEDANCE_STATUS_LABELS[event.prev_status] || event.prev_status}
+                  {' → '}
+                </span>
+              ) : null}
+              <span>{EXCEEDANCE_STATUS_LABELS[event.status] || event.status || '-'}</span>
+              {event.prev_value !== null && event.prev_value !== undefined && event.prev_value !== event.value ? (
+                <span className="muted">
+                  {' · '}监测值 {formatNumber(event.prev_value)} → {formatNumber(event.value)}
+                </span>
+              ) : null}
+              {event.level_label ? <span className="muted"> · {event.level_label}</span> : null}
+            </div>
+            {event.note ? <div className="small muted" style={{ marginTop: 2 }}>{event.note}</div> : null}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
 
 export default function AnnotationModal({ exceedanceId, onClose, onSaved }) {
   const toast = useToast()
@@ -27,7 +74,7 @@ export default function AnnotationModal({ exceedanceId, onClose, onSaved }) {
   useEffect(() => {
     if (!data) return
     setForm({
-      status: data.status,
+      status: data.status === 'revoked' ? 'confirmed' : data.status,
       level: data.level,
       note: data.note || '',
       annotator: data.annotator || ''
@@ -35,6 +82,8 @@ export default function AnnotationModal({ exceedanceId, onClose, onSaved }) {
     setErrors({})
     setMessage(null)
   }, [data])
+
+  const revoked = data?.status === 'revoked'
 
   const submit = async () => {
     setBusy(true)
@@ -67,11 +116,13 @@ export default function AnnotationModal({ exceedanceId, onClose, onSaved }) {
       footer={
         <>
           <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            取消
+            {revoked ? '关闭' : '取消'}
           </button>
-          <button type="button" className="btn btn-primary" onClick={submit} disabled={busy || !data}>
-            {busy ? '保存中...' : '保存标注'}
-          </button>
+          {!revoked ? (
+            <button type="button" className="btn btn-primary" onClick={submit} disabled={busy || !data}>
+              {busy ? '保存中...' : '保存标注'}
+            </button>
+          ) : null}
         </>
       }
     >
@@ -115,66 +166,85 @@ export default function AnnotationModal({ exceedanceId, onClose, onSaved }) {
             <dt>数据录入</dt>
             <dd>
               {measurement?.recorder || '-'} · {measurement?.data_source_label || '-'}
+              {data.measurement_revision > 1 ? ` · 第 ${data.measurement_revision} 次修正` : ''}
             </dd>
           </dl>
 
-          {message ? <Alert tone="error">{message}</Alert> : null}
+          {revoked ? (
+            <Alert tone="info">
+              该记录因数据修正后不再超标, 已被系统撤销, 不能标注; 历史标注与修正过程见下方留痕。
+            </Alert>
+          ) : null}
+          {data.annotation_stale && !revoked ? (
+            <Alert tone="warning">
+              该记录在 {data.annotator || '他人'} 标注后监测数据被修正过(当前为第 {data.measurement_revision} 次修正),
+              原标注结论基于旧数据, 请复核后重新标注。
+            </Alert>
+          ) : null}
 
-          <Field label="标注结论" required error={errors.status}>
-            <div className="stack">
-              {STATUS_CHOICES.map((choice) => (
-                <label key={choice.value} className="checkbox" style={{ alignItems: 'flex-start' }}>
-                  <input
-                    type="radio"
-                    name="annotation-status"
-                    checked={form.status === choice.value}
-                    onChange={() => setForm({ ...form, status: choice.value })}
+          <EventTrail events={data.events} />
+
+          {!revoked ? (
+            <>
+              {message ? <Alert tone="error">{message}</Alert> : null}
+
+              <Field label="标注结论" required error={errors.status}>
+                <div className="stack">
+                  {STATUS_CHOICES.map((choice) => (
+                    <label key={choice.value} className="checkbox" style={{ alignItems: 'flex-start' }}>
+                      <input
+                        type="radio"
+                        name="annotation-status"
+                        checked={form.status === choice.value}
+                        onChange={() => setForm({ ...form, status: choice.value })}
+                      />
+                      <span>
+                        <span className="strong">{choice.label}</span>
+                        <span className="small muted" style={{ display: 'block' }}>
+                          {choice.hint}
+                        </span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </Field>
+
+              <div className="form-grid">
+                <Field label="超标等级 (可人工修正)" error={errors.level}>
+                  <select
+                    className="select"
+                    value={form.level || ''}
+                    onChange={(event) => setForm({ ...form, level: event.target.value })}
+                  >
+                    <option value="light">轻度超标</option>
+                    <option value="moderate">中度超标</option>
+                    <option value="severe">重度超标</option>
+                  </select>
+                </Field>
+                <Field label="标注人" error={errors.annotator}>
+                  <Input
+                    value={form.annotator}
+                    onChange={(event) => setForm({ ...form, annotator: event.target.value })}
+                    placeholder="如: 王敏"
                   />
-                  <span>
-                    <span className="strong">{choice.label}</span>
-                    <span className="small muted" style={{ display: 'block' }}>
-                      {choice.hint}
-                    </span>
-                  </span>
-                </label>
-              ))}
-            </div>
-          </Field>
+                </Field>
+              </div>
 
-          <div className="form-grid">
-            <Field label="超标等级 (可人工修正)" error={errors.level}>
-              <select
-                className="select"
-                value={form.level || ''}
-                onChange={(event) => setForm({ ...form, level: event.target.value })}
+              <Field
+                label="标注说明"
+                required={form.status !== 'pending'}
+                error={errors.note}
+                hint="确认或忽略时必须填写原因, 便于后续追溯"
               >
-                <option value="light">轻度超标</option>
-                <option value="moderate">中度超标</option>
-                <option value="severe">重度超标</option>
-              </select>
-            </Field>
-            <Field label="标注人" error={errors.annotator}>
-              <Input
-                value={form.annotator}
-                onChange={(event) => setForm({ ...form, annotator: event.target.value })}
-                placeholder="如: 王敏"
-              />
-            </Field>
-          </div>
-
-          <Field
-            label="标注说明"
-            required={form.status !== 'pending'}
-            error={errors.note}
-            hint="确认或忽略时必须填写原因, 便于后续追溯"
-          >
-            <Textarea
-              value={form.note}
-              onChange={(event) => setForm({ ...form, note: event.target.value })}
-              invalid={Boolean(errors.note)}
-              placeholder="如: 数据经复核属实, 已通知运维排查周边排放源"
-            />
-          </Field>
+                <Textarea
+                  value={form.note}
+                  onChange={(event) => setForm({ ...form, note: event.target.value })}
+                  invalid={Boolean(errors.note)}
+                  placeholder="如: 数据经复核属实, 已通知运维排查周边排放源"
+                />
+              </Field>
+            </>
+          ) : null}
         </div>
       ) : null}
     </Modal>

@@ -57,6 +57,7 @@ export default function ExceedancesPage() {
       })
       toast.success(`已标注 ${result.updated} 条记录`)
       if (result.missing?.length) toast.warning(`有 ${result.missing.length} 条记录不存在, 已跳过`)
+      if (result.skipped?.length) toast.warning(`有 ${result.skipped.length} 条已撤销记录不能标注, 已跳过`)
       setSelected([])
       setBatch((prev) => ({ ...prev, note: '' }))
       reload()

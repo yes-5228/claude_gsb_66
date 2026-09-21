@@ -25,16 +25,19 @@ export default function ExceedanceSummaryCards({ summary }) {
         label="待标注"
         value={summary.pending}
         tone={summary.pending ? 'warning' : undefined}
-        foot={`已确认 ${statusMap.confirmed || 0} · 已忽略 ${statusMap.ignored || 0}`}
+        foot={`已确认 ${statusMap.confirmed || 0} · 已忽略 ${statusMap.ignored || 0} · 已撤销 ${statusMap.revoked || 0}`}
       />
       <StatCard
         label="等级分布"
         value={byLevel.severe || 0}
         unit="条重度"
         tone={byLevel.severe ? 'danger' : undefined}
-        foot={Object.entries(EXCEEDANCE_LEVEL_LABELS)
-          .map(([key, label]) => `${label} ${byLevel[key] || 0}`)
-          .join(' · ')}
+        foot={
+          (summary.stale ? `数据已修正待复核 ${summary.stale} 条 · ` : '') +
+          Object.entries(EXCEEDANCE_LEVEL_LABELS)
+            .map(([key, label]) => `${label} ${byLevel[key] || 0}`)
+            .join(' · ')
+        }
       />
       <StatCard label="平均超标倍数" value={formatRatio(summary.avg_ratio)} foot={topPollutants ? `高发因子: ${topPollutants}` : '暂无统计'} />
     </div>

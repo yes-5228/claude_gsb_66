@@ -29,6 +29,8 @@ class Measurement(TimestampMixin, db.Model):
     data_source = db.Column(db.String(16), nullable=False, default="manual")
     recorder = db.Column(db.String(64))
     remark = db.Column(db.Text)
+    # 修正版本号: 首次录入为 1, 每次覆盖修正 +1, 用于关联超标留痕事件
+    revision = db.Column(db.Integer, nullable=False, default=1)
 
     station = db.relationship("Station", back_populates="measurements")
     exceedance = db.relationship(
@@ -61,6 +63,7 @@ class Measurement(TimestampMixin, db.Model):
             "data_source_label": label_of(DATA_SOURCE_LABELS, self.data_source),
             "recorder": self.recorder,
             "remark": self.remark,
+            "revision": self.revision,
             "created_at": iso(self.created_at),
             "updated_at": iso(self.updated_at),
             "exceedance_id": self.exceedance.id if self.exceedance else None,
